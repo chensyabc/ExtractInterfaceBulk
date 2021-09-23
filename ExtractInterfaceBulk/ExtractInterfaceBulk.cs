@@ -98,6 +98,7 @@ namespace ExtractInterfaceBulk
 
         private string SolutionDirectory { get; set; }
         private string MoveInterfaceToFolder = "Shared/Interfaces";
+        private string ProjectName { get; set; }
         private string[] RemoveLines { get; set; }
         private string[] DeleteLinesWildCard { get; set; }
         private string[] SpecialClassesWithBaseInterface { get; set; }
@@ -136,7 +137,8 @@ namespace ExtractInterfaceBulk
 
             var solutionName = Path.GetFileName(solution.FullName);
             var solutionDir = Path.GetDirectoryName(solution.FullName);
-            var projectName = Path.GetFileName(project.FullName);
+            var projectFileName = Path.GetFileName(project.FullName);
+            var projectName = Path.GetFileNameWithoutExtension(project.FullName);
             var projectDir = Path.GetDirectoryName(project.FullName);
 
             var needAddClasses = new List<string>();
@@ -144,6 +146,7 @@ namespace ExtractInterfaceBulk
             var allFiles = FindSubordinaryFiles(projectDir, ignoreFolders);
 
             this.SolutionDirectory = solutionDir;
+            this.ProjectName = projectName;
 
             string[] lines = File.ReadAllLines(@"Setting/DeleteLines.txt");
             var deleteLines = lines.Where(line => !string.IsNullOrEmpty(line)).ToArray();
@@ -338,9 +341,9 @@ namespace ExtractInterfaceBulk
                 if (isToReplaceNameSpace)
                 {
                     // 7.0, if previous already changes, modify
-                    if (allText.Contains("namespace Entities"))
+                    if (allText.Contains($"namespace {this.ProjectName}"))
                     {
-                        ReplaceContent(editingView.TextBuffer, null, "namespace Entities", "namespace Shared.Interfaces");
+                        ReplaceContent(editingView.TextBuffer, null, $"namespace {this.ProjectName}", "namespace Shared.Interfaces");
                     }
                     else
                     {
@@ -416,11 +419,11 @@ namespace ExtractInterfaceBulk
                         var fileNameWithExtension = Path.GetFileName(filePathWithExtension);
                         var directoryName = new DirectoryInfo(Path.GetDirectoryName(filePathWithExtension)).Name;
                         var newPath = Path.Combine(this.SolutionDirectory, moveInterfaceToFolder);
-                        if (directoryName != "Entities")
+                        if (directoryName != this.ProjectName)
                         {
                             var parentParentDirectoryName = new DirectoryInfo(Directory.GetParent(Path.GetDirectoryName(filePathWithExtension)).FullName).Name;
 
-                            if (parentParentDirectoryName != "Entities")
+                            if (parentParentDirectoryName != this.ProjectName)
                             {
                                 newPath = Path.Combine(this.SolutionDirectory, moveInterfaceToFolder, parentParentDirectoryName, directoryName);
                             }
