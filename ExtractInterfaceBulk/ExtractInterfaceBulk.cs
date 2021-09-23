@@ -11,16 +11,15 @@ using Microsoft.VisualStudio.TextManager.Interop;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.Design;
-using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 using Task = System.Threading.Tasks.Task;
+using SystemConfiguration = System.Configuration;
+using static ExtractInterfaceBulk.VSExtensionHelper;
 
 namespace ExtractInterfaceBulk
 {
@@ -94,6 +93,19 @@ namespace ExtractInterfaceBulk
             Instance = new ExtractInterfaceBulk(package, commandService);
         }
 
+
+        #region Members
+
+        private string SolutionDirectory { get; set; }
+        private string MoveInterfaceToFolder = "Shared/Interfaces";
+        private string[] RemoveLines { get; set; }
+        private string[] DeleteLinesWildCard { get; set; }
+        private string[] SpecialClassesWithBaseInterface { get; set; }
+        private string[] IgnoreClasses { get; set; }
+
+        #endregion
+
+
         /// <summary>
         /// This function is the callback used to execute the command when the menu item is clicked.
         /// See the constructor to see how the menu item is associated with this function using
@@ -106,10 +118,8 @@ namespace ExtractInterfaceBulk
             WriteLog("**************************************************");
             WriteLog("Start to execute of this extension.");
 
-
-            var ignoreFolders = new string[] { "bin", "obj", "Interfaces", "DummyEntity", "Extensions", "" };
-            var ignoreFiles = new string[] { "AssemblyInfo.cs", };
-            var interfaceInherit = "IAdoEntity";
+            var ignoreFolders = new string[] { "bin", "obj", "Interfaces" };
+            var baseInterface = "IBaseInterface";
 
             ThreadHelper.ThrowIfNotOnUIThread();
             string message = string.Format(CultureInfo.CurrentCulture, "Inside {0}.MenuItemCallback()", this.GetType().FullName);
@@ -132,18 +142,35 @@ namespace ExtractInterfaceBulk
             var needAddClasses = new List<string>();
             var alreadyHasInterfaceClasses = new List<string>();
             var allFiles = FindSubordinaryFiles(projectDir, ignoreFolders);
+
+            this.SolutionDirectory = solutionDir;
+
+            string[] lines = File.ReadAllLines(@"Setting/DeleteLines.txt");
+            var deleteLines = lines.Where(line => !string.IsNullOrEmpty(line)).ToArray();
+
+            string[] linesWildCard = File.ReadAllLines(@"Setting/DeleteLinesWildCard.txt");
+            this.DeleteLinesWildCard = linesWildCard.Where(line => !string.IsNullOrEmpty(line)).ToArray();
+
+            string[] specialClassesWithBaseInterface = File.ReadAllLines(@"Setting/SpecialClassesWithBaseInterface.txt");
+            this.SpecialClassesWithBaseInterface = specialClassesWithBaseInterface.Where(line => !string.IsNullOrEmpty(line)).ToArray();
+
+            string[] ignoreClasses = File.ReadAllLines(@"Setting/IgnoreClasses.txt");
+            this.IgnoreClasses = ignoreClasses.Where(line => !string.IsNullOrEmpty(line)).ToArray();
+
+            // OptionA: extract interface bulk
             allFiles.ForEach(file =>
             {
-                var processedClass = ExtractInterface(file, vsDte2, alreadyHasInterfaceClasses, interfaceInherit);
+                var processedClass = ExtractInterface(file, vsDte2, alreadyHasInterfaceClasses, baseInterface, deleteLines);
+
                 if (!string.IsNullOrEmpty(processedClass))
                     needAddClasses.Add(processedClass);
             });
 
             WriteLog("Writing final summary message.");
-            var summaryMsg = string.Format(@"Processed Classes: {0} \r\n Already has Interface: {1}", string.Join(",", needAddClasses.ToArray()), string.Join(",", alreadyHasInterfaceClasses.ToArray()));
+            var summaryMsg = string.Format(@"Processed Classes: {0} \n\r Already has Interface: {1}", string.Join(",", needAddClasses.ToArray()), string.Join(",", alreadyHasInterfaceClasses.ToArray()));
             WriteLog(summaryMsg);
+            WriteLog("Execution End.");
 
-            System.Windows.Forms.SendKeys.Flush();
             // Show message box about Processed Classes
             VsShellUtilities.ShowMessageBox(
                 this.package,
@@ -154,62 +181,35 @@ namespace ExtractInterfaceBulk
                 OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
         }
 
-        [DllImport("user32.dll", EntryPoint = "keybd_event", SetLastError = true)]
-        public static extern void keybd_event(Keys bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
-        public const int KEYEVENTF_KEYUP = 2;
-
         /// <summary>
         /// return processed class name
         /// </summary>
-        private string ExtractInterface(string file, DTE2 dte2, List<string> alreadyHasInterfaceClasses, string interfaceInherit)
+        private string ExtractInterface(string filePathWithExtension, DTE2 vsDte2, List<string> alreadyHasInterfaceClasses, string baseInterface, string[] deleteLines)
         {
-            var logMsg = string.Empty;
-
             var processedClass = string.Empty;
             Microsoft.VisualStudio.Shell.ThreadHelper.ThrowIfNotOnUIThread();
             // only process class files, and .cs is first judgement
-            if (file.EndsWith(".cs"))
+            if (filePathWithExtension.EndsWith(".cs"))
             {
-                Debug.WriteLine("begin process file: " + file);
-                logMsg += "\n" + "begin process file: " + file;
-                WriteLog("begin process file: " + file);
+                // 1, Open File
+                var openFileWindow = OpenFileAndActive(vsDte2, filePathWithExtension);
 
-                // Open class file
-                Debug.WriteLine("before open file: " + file);
-                logMsg += "\n" + "before open file: " + file;
-                WriteLog("before open file: " + file);
-
-                var openFileWindow = dte2.ItemOperations.OpenFile(file);
-                openFileWindow.Activate();
-                //dte2.Documents.Open(file);
-
-                System.Threading.Thread.Sleep(100);
-                //while (!dte2.ItemOperations.IsFileOpen(file))
-                //{
-                //    System.Threading.Thread.Sleep(1000);
-                //    Debug.WriteLine("opening file: " + file);
-                //    logMsg += "\n" + "opening file: " + file;
-                //    Debug.WriteLine("opening file: " + file);
-                //}
-                //Debug.WriteLine("opened file: " + file);
-                //logMsg += "\n" + "opened file: " + file;
-                WriteLog("opened file: " + file);
-
-                var iWpfTextViewHost = GetCurrentViewHost();
+                // 2, Get Editing View
+                var editingView = GetEditingView();
+                var allText = editingView.TextSnapshot.GetText();
                 //Keep below, this may be used in future.
                 //var iTextDocument = GetTextDocumentForView(iWpfTextViewHost);
                 //var xx = iTextDocument.TextBuffer;
 
-                var view = iWpfTextViewHost.TextView;
+                // 3, Move to Caret of interface line
                 var textToSearch = "public class";
-                var indexOfPublicClass = view.TextSnapshot.GetText().IndexOf(textToSearch);
-                if (indexOfPublicClass < 0) return processedClass;
-                view.Caret.MoveTo(view.GetTextViewLineContainingBufferPosition(view.TextSnapshot.GetLineFromPosition(0).Start));
-                view.Caret.MoveTo(view.GetTextViewLineContainingBufferPosition(view.TextSnapshot.GetLineFromPosition(indexOfPublicClass).Start));
-
+                if (!MoveToCaretToSearchText(editingView, textToSearch))
+                {
+                    return processedClass;
+                }
                 openFileWindow.Activate();
 
-                var allText = view.TextSnapshot.GetText();
+                // 4, Find class line
                 Regex regex = new Regex(@"public class (\S+)");
                 if (regex.IsMatch(allText))
                 {
@@ -217,17 +217,15 @@ namespace ExtractInterfaceBulk
                 }
                 else
                 {
-                    Debug.WriteLine("find no class: " + processedClass);
-                    logMsg += "\n" + "find no class: " + processedClass;
                     WriteLog("find no class: " + processedClass);
-
-                    return processedClass;
+                    return string.Empty;
                 }
 
-                Debug.WriteLine("find class: " + processedClass);
-                logMsg += "\n" + "find class: " + processedClass;
                 WriteLog("find class: " + processedClass);
+                if (this.IgnoreClasses.Contains(processedClass))
+                    return string.Empty;
 
+                // 5, Check if it has interface
                 var interfaceName = string.Format("I{0}", processedClass);
                 var interfacePart1 = string.Format(": I{0}", processedClass);
                 var interfacePart2 = string.Format(", I{0}", processedClass);
@@ -238,100 +236,284 @@ namespace ExtractInterfaceBulk
                     return string.Empty;
                 }
 
+                // 6, extract interface for class
                 openFileWindow.Activate();
                 SimulateKeysToExtractInterface();
-                openFileWindow.Activate();
 
-                string fileName = System.IO.Path.GetFileName(file);
-                string interfaceFile = file.Replace(processedClass + ".cs", "I" + processedClass + ".cs");
+                var replaceBaseInterfaceResult = ReplaceContent(editingView.TextBuffer, null, $" {baseInterface},", string.Empty);
+
+                var parentDirectory = Path.GetDirectoryName(filePathWithExtension);
+                string interfaceFile = Path.Combine(parentDirectory, $"{interfaceName}.cs");
                 if (!File.Exists(interfaceFile))
                 {
                     WriteLog("interface file not found!");
                     return string.Empty;
                 }
 
-                //var openFileWindow2 = dte2.ItemOperations.OpenFile(interfaceFile);
-                //openFileWindow2.Activate();
-                //ModifyInterface(interfaceName, openFileWindow2);
+                // 7, modify interface
+                ModifyInterface(interfaceFile, vsDte2, new List<string>(), baseInterface, replaceBaseInterfaceResult || this.SpecialClassesWithBaseInterface.Contains(processedClass), deleteLines);
 
-                Debug.WriteLine("extract interface successfully: " + processedClass);
-                logMsg += "\n" + "extract interface successfully: " + processedClass;
+                // 8, move interface file
+                MoveInterface(interfaceFile, this.MoveInterfaceToFolder);
+
+                openFileWindow.Close(vsSaveChanges.vsSaveChangesYes);
+
                 WriteLog("extract interface successfully: " + processedClass);
             }
 
             return processedClass;
         }
 
-        private void ModifyInterface(string interfaceName, Window openFileWindow2)
+        private void MoveInterface(string interfaceFile, Func<string, string, string> moveInterfaceToFolder)
         {
-            return;
+            throw new NotImplementedException();
+        }
 
-            var iWpfTextViewHost = GetCurrentViewHost();
-            //Keep below, this may be used in future.
-            //var iTextDocument = GetTextDocumentForView(iWpfTextViewHost);
-            //var xx = iTextDocument.TextBuffer;
-
-            var view = iWpfTextViewHost.TextView;
-            var indexOfPublicInterface = view.TextSnapshot.GetText().IndexOf(interfaceName);
-            if (indexOfPublicInterface > 0)
+        /// <summary>
+        /// return processed interface name
+        /// </summary>
+        private string ModifyInterface(string filePathWithExtension, DTE2 vsDte2, List<string> alreadyHasInterfaceClasses, string baseInterface, bool isClassInheritBaseInterface, string[] deleteLines)
+        {
+            var processedInterface = string.Empty;
+            Microsoft.VisualStudio.Shell.ThreadHelper.ThrowIfNotOnUIThread();
+            // only process interface files, and .cs is first judgement
+            if (filePathWithExtension.EndsWith(".cs"))
             {
-                openFileWindow2.Activate();
+                WriteLog("begin ModifyInterface file: " + filePathWithExtension);
 
-                WriteLog("interface modification: start");
+                // 1, Open File
+                var openFileWindow = OpenFileAndActive(vsDte2, filePathWithExtension);
 
-                view.Caret.MoveTo(view.GetTextViewLineContainingBufferPosition(view.TextSnapshot.GetLineFromPosition(0).Start));
-                view.Caret.MoveTo(view.GetTextViewLineContainingBufferPosition(view.TextSnapshot.GetLineFromPosition(indexOfPublicInterface).End));
-                System.Windows.Forms.SendKeys.SendWait("{DOWN}");
-                System.Windows.Forms.SendKeys.SendWait("{LEFT}");
+                // 2, Get Editing View
+                var editingView = GetEditingView();
+                var allText = editingView.TextSnapshot.GetText();
 
-                System.Windows.Forms.SendKeys.SendWait(" : IAdoEntity");
-                System.Threading.Thread.Sleep(200);
-                System.Windows.Forms.SendKeys.SendWait("^S");
-                System.Threading.Thread.Sleep(200);
+                // 3, Move to Caret of interface line
+                if (!MoveToCaretToSearchText(editingView, "public interface"))
+                {
+                    return processedInterface;
+                }
+                openFileWindow.Activate();
 
-                WriteLog("interface modification: end");
+                bool isToAddBaseInterface = true;
+                bool isToReplaceNameSpace = true;
+                bool isToRemoveLines = true;
+
+                // add base interface
+                if (isToAddBaseInterface && isClassInheritBaseInterface)
+                {
+                    // 4, See if Interface has Inherit interfaceInherit
+                    var interfacePart1 = string.Format(": {0}", baseInterface);
+                    var interfacePart2 = string.Format(", {0}", baseInterface);
+                    if (allText.Contains(interfacePart1) || allText.Contains(interfacePart2))
+                    {
+                        WriteLog("already inherit interface: " + processedInterface);
+                        alreadyHasInterfaceClasses.Add(processedInterface);
+                        return string.Empty;
+                    }
+
+                    // 5, Get Interface Name
+                    Regex regex = new Regex(@"public interface (\S+)");
+                    if (regex.IsMatch(allText))
+                    {
+                        processedInterface = regex.Match(allText).Value.Substring(17);
+                        WriteLog("find interface: " + processedInterface);
+                    }
+                    else
+                    {
+                        WriteLog("find no interface: " + processedInterface);
+                        return processedInterface;
+                    }
+
+                    // Ignore BaseInterface
+                    if (processedInterface == baseInterface)
+                        return string.Empty;
+
+                    // 6, Append Interface interfaceInherit
+                    openFileWindow.Activate();
+                    SimulateKeysToMakeInterfaceInheritBaseInterface(baseInterface);
+                }
+
+                // Replace namespace
+                if (isToReplaceNameSpace)
+                {
+                    // 7.0, if previous already changes, modify
+                    if (allText.Contains("namespace Entities"))
+                    {
+                        ReplaceContent(editingView.TextBuffer, null, "namespace Entities", "namespace Shared.Interfaces");
+                    }
+                    else
+                    {
+                        alreadyHasInterfaceClasses.Add(processedInterface);
+                        return string.Empty;
+                    }
+                }
+
+                // Remove lines
+                if (isToRemoveLines)
+                {
+                    if (isClassInheritBaseInterface)
+                    {
+                        if (deleteLines.Any())
+                        {
+                            DeleteLine(editingView.TextBuffer, null, deleteLines);
+                        }
+                    }
+
+                    foreach (var deleteLineWildCard in this.DeleteLinesWildCard)
+                    {
+                        DeleteLineWithWildCard(editingView.TextBuffer, null, deleteLineWildCard);
+                    }
+                }
+
+                if (isClassInheritBaseInterface)
+                {
+                    InsertAfterSpecificText(editingView, "    {", "        #region Members\r\n\r\n");
+
+                    var appendLines = "        #endregion\r\n";
+                    appendLines += "\r\n\r\n";
+                    appendLines += "        #region NonDB Members\r\n        #endregion\r\n";
+                    appendLines += "\r\n\r\n";
+                    appendLines += "        #region Navigation Properties\r\n        #endregion\r\n";
+                    //appendLines += "\r\n\r\n";
+                    //appendLines += "        #region Manipulations\r\n        #endregion\r\n";
+                    AppendPreviousLineInFile(editingView, "    }", appendLines);
+                }
+                else
+                {
+                    InsertAfterSpecificText(editingView, "    {", "        #region Members\r\n\r\n");
+
+                    var appendLines = "        #endregion\r\n";
+                    appendLines += "\r\n\r\n";
+                    appendLines += "        #region Navigation Properties\r\n        #endregion\r\n";
+                    AppendPreviousLineInFile(editingView, "    }", appendLines);
+                }
+
+                openFileWindow.Close(vsSaveChanges.vsSaveChangesYes);
+
+                WriteLog("end ModifyInterface successfully: " + processedInterface);
             }
+
+            return processedInterface;
+        }
+
+        private string MoveInterface(string filePathWithExtension, string moveInterfaceToFolder)
+        {
+            if (string.IsNullOrEmpty(moveInterfaceToFolder)) return string.Empty;
+
+            var processedInterface = string.Empty;
+            Microsoft.VisualStudio.Shell.ThreadHelper.ThrowIfNotOnUIThread();
+            // only process interface files, and .cs is first judgement
+            if (filePathWithExtension.EndsWith(".cs"))
+            {
+                WriteLog("begin ModifyInterface file: " + filePathWithExtension);
+
+                // 1, see if file exists
+                if (File.Exists(filePathWithExtension))
+                {
+                    try
+                    {
+                        var fileNameWithExtension = Path.GetFileName(filePathWithExtension);
+                        var directoryName = new DirectoryInfo(Path.GetDirectoryName(filePathWithExtension)).Name;
+                        var newPath = Path.Combine(this.SolutionDirectory, moveInterfaceToFolder);
+                        if (directoryName != "Entities")
+                        {
+                            var parentParentDirectoryName = new DirectoryInfo(Directory.GetParent(Path.GetDirectoryName(filePathWithExtension)).FullName).Name;
+
+                            if (parentParentDirectoryName != "Entities")
+                            {
+                                newPath = Path.Combine(this.SolutionDirectory, moveInterfaceToFolder, parentParentDirectoryName, directoryName);
+                            }
+                            else
+                            {
+                                newPath = Path.Combine(this.SolutionDirectory, moveInterfaceToFolder, directoryName);
+                            }
+                        }
+                        var newFilePathWithExtension = Path.Combine(newPath, fileNameWithExtension);
+
+                        if (!Directory.Exists(newPath)) Directory.CreateDirectory(newPath);
+
+                        if (!File.Exists(newFilePathWithExtension))
+                        {
+                            File.Move(filePathWithExtension, newFilePathWithExtension);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        throw;
+                    }
+                }
+
+                WriteLog("end ModifyInterface successfully: " + processedInterface);
+            }
+
+            return processedInterface;
+        }
+
+
+        private bool MoveToCaretToSearchText(IWpfTextView view, string textToSearch)
+        {
+            var indexOfPublicClass = view.TextSnapshot.GetText().IndexOf(textToSearch);
+            if (indexOfPublicClass < 0)
+                return false;
+            view.Caret.MoveTo(view.GetTextViewLineContainingBufferPosition(view.TextSnapshot.GetLineFromPosition(0).Start));
+            view.Caret.MoveTo(view.GetTextViewLineContainingBufferPosition(view.TextSnapshot.GetLineFromPosition(indexOfPublicClass).Start));
+
+            return true;
+        }
+
+        private Window OpenFileAndActive(DTE2 vsDte2, string filePathWithExtension)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            // Open interface file
+            WriteLog("before open file: " + filePathWithExtension);
+            var openFileWindow = vsDte2.ItemOperations.OpenFile(filePathWithExtension);
+            openFileWindow.Activate();
+            System.Threading.Thread.Sleep(100);
+            WriteLog("opened file: " + filePathWithExtension);
+
+            return openFileWindow;
         }
 
         private static object _lock = new object();
 
         private static void SimulateKeysToExtractInterface()
         {
-            WriteLog("SimulateKeysToExtractInterface: start");
-
             lock (_lock)
             {
-
                 // pass shortcut Ctrl + R; Ctrl + I to it.
-                System.Windows.Forms.SendKeys.SendWait("^R^I");
+                System.Windows.Forms.SendKeys.Send("^R^I");
                 //System.Threading.Thread.Sleep(200);
                 System.Windows.Forms.SendKeys.SendWait("{ENTER}");
                 //System.Threading.Thread.Sleep(100);
                 System.Windows.Forms.SendKeys.SendWait("^S");
-                System.Threading.Thread.Sleep(100);
+                System.Threading.Thread.Sleep(1);
                 System.Windows.Forms.SendKeys.Flush();
-
-                WriteLog("SimulateKeysToExtractInterface: end");
             }
+        }
 
-            //keybd_event(Keys.ControlKey, 0, 0, 0);
-            //keybd_event(Keys.ShiftKey, 0, 0, 0);
-            //keybd_event(Keys.R, 0, 0, 0);
-            //keybd_event(Keys.R, 0, KEYEVENTF_KEYUP, 0);
-            //keybd_event(Keys.I, 0, 0, 0);
+        private void SimulateKeysToMakeInterfaceInheritBaseInterface(string baseInterface)
+        {
+            lock (_lock)
+            {
+                // pass shortcut Ctrl + R; Ctrl + I to it.
+                SendKeys.SendWait("{END}");
+                SendKeys.SendWait(string.Format(" : {0}", baseInterface));
+                //SendKeys.SendWait("^S");
+                SendKeys.Flush();
+                System.Threading.Thread.Sleep(1);
+            }
+        }
 
-            //keybd_event(Keys.I, 0, KEYEVENTF_KEYUP, 0);
-            //keybd_event(Keys.ShiftKey, 0, KEYEVENTF_KEYUP, 0);
-            //keybd_event(Keys.ControlKey, 0, KEYEVENTF_KEYUP, 0);
-            //System.Threading.Thread.Sleep(2000);
+        private IWpfTextView GetEditingView()
+        {
+            var iWpfTextViewHost = GetCurrentViewHost();
+            var editingView = iWpfTextViewHost.TextView;
 
-            //keybd_event(Keys.Enter, 0, 0, 0);
-            //keybd_event(Keys.Enter, 0, KEYEVENTF_KEYUP, 0);
-            //System.Threading.Thread.Sleep(2000);
+            return editingView;
         }
 
         private IWpfTextViewHost GetCurrentViewHost()
-
         {
             // code to get access to the editor's currently selected text cribbed from
             // http://msdn.microsoft.com/en-us/library/dd884850.aspx

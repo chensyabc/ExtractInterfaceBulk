@@ -1,0 +1,4 @@
+﻿1, support this extension to have ability to process multiple base interfaces
+2, make Interface to be parallel execution which can reduce time
+3, make Extract Interface to be Inner VSEdit instead of send Key
+4, add one function to repalce whole line for namespace

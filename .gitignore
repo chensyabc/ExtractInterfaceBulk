@@ -1,3 +1,6 @@
 obj
 bin
 /.vs/ExtractInterfaceBulk/v16/*.suo
+/ExtractInterfaceBulk/*.user
+/.vs
+/packages
